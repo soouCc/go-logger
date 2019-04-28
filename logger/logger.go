@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"runtime/debug"
+	"io/ioutil"
+	"strings"
 )
 
 const (
@@ -55,6 +58,7 @@ type _FILE struct {
 	mu       *sync.RWMutex
 	logfile  *os.File
 	lg       *log.Logger
+	logExp  int64        //日志有效期  默认7天
 }
 
 func SetConsole(isConsole bool) {
@@ -65,13 +69,19 @@ func SetLevel(_level LEVEL) {
 	logLevel = _level
 }
 
-func SetRollingFile(fileDir, fileName string, maxNumber int32, maxSize int64, _unit UNIT) {
+func SetRollingFile(fileDir, fileName string, maxNumber int32, maxSize int64, _unit UNIT,exp int64) {
 	maxFileCount = maxNumber
 	maxFileSize = maxSize * int64(_unit)
 	RollingFile = true
 	dailyRolling = false
 	mkdirlog(fileDir)
-	logObj = &_FILE{dir: fileDir, filename: fileName, isCover: false, mu: new(sync.RWMutex)}
+
+	logExp:=int64(7*24*60*60)
+	if exp>0{
+		logExp=exp*24*60*60
+	}
+
+	logObj = &_FILE{dir: fileDir, filename: fileName, isCover: false, mu: new(sync.RWMutex),logExp:logExp}
 	logObj.mu.Lock()
 	defer logObj.mu.Unlock()
 	for i := 1; i <= int(maxNumber); i++ {
@@ -88,14 +98,23 @@ func SetRollingFile(fileDir, fileName string, maxNumber int32, maxSize int64, _u
 		logObj.rename()
 	}
 	go fileMonitor()
+	
+	go fileClear()
 }
 
-func SetRollingDaily(fileDir, fileName string) {
+func SetRollingDaily(fileDir, fileName string,exp int64) {
 	RollingFile = false
 	dailyRolling = true
+
 	t, _ := time.Parse(DATEFORMAT, time.Now().Format(DATEFORMAT))
 	mkdirlog(fileDir)
-	logObj = &_FILE{dir: fileDir, filename: fileName, _date: &t, isCover: false, mu: new(sync.RWMutex)}
+
+	logExp:=int64(7*24*60*60)
+	if exp>0{
+		logExp=exp*24*60*60
+	}
+
+	logObj = &_FILE{dir: fileDir, filename: fileName, _date: &t, isCover: false, mu: new(sync.RWMutex),logExp:logExp}
 	logObj.mu.Lock()
 	defer logObj.mu.Unlock()
 
@@ -105,6 +124,8 @@ func SetRollingDaily(fileDir, fileName string) {
 	} else {
 		logObj.rename()
 	}
+
+	go fileClear()
 }
 
 func mkdirlog(dir string) (e error) {
@@ -139,6 +160,7 @@ func console(s ...interface{}) {
 func catchError() {
 	if err := recover(); err != nil {
 		log.Println("err", err)
+		log.Println("err Stack:",debug.Stack())
 	}
 }
 
@@ -305,14 +327,40 @@ func fileMonitor() {
 }
 
 func fileCheck() {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Println(err)
-		}
-	}()
+	defer catchError()
 	if logObj != nil && logObj.isMustRename() {
 		logObj.mu.Lock()
 		defer logObj.mu.Unlock()
 		logObj.rename()
 	}
+}
+
+func fileClear()  {
+	defer catchError()
+	timer := time.NewTicker(1 * time.Second)
+	for {
+		select {
+		case <-timer.C:
+			clear(logObj.dir,logObj.logExp)
+		}
+	}
+}
+
+func clear(dirname string,nums int64) (err error){
+
+	defer catchError()
+
+	now := time.Now()
+	dirList, err := ioutil.ReadDir(dirname)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	for _,v := range dirList {
+		if now.Unix() - v.ModTime().Unix() > nums {
+			os.Remove(strings.Join([]string{dirname, v.Name()}, "/"))
+		}
+	}
+	return
 }
